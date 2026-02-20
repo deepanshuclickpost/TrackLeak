@@ -451,9 +451,9 @@ curl -s 'http://localhost:9200/trackleak-memory/_search?pretty' \
 ## Limitations
 
 - **Linux only** — `LD_PRELOAD` is a Linux dynamic linker feature.
-- **pymalloc arena** — Python's internal allocator handles objects ≤512 bytes without calling `malloc`. These allocations won't be tracked. To force all allocations through `malloc`:
+- **pymalloc arena** — By default, Python's internal allocator handles objects ≤512 bytes without calling `malloc`. To track these too, force all allocations through `malloc` and lower the minimum size:
   ```bash
-  PYTHONMALLOC=malloc LD_PRELOAD=./trackleak.so python3.11 app.py
+  PYTHONMALLOC=malloc TRACKLEAK_MIN_SIZE=100 LD_PRELOAD=./trackleak.so python3.11 app.py
   ```
 - **Sampling** — By default, only 1 in 50 allocations are tracked for retention. Set `TRACKLEAK_SAMPLE_RATE=1` for exhaustive tracking (higher overhead).
 - **GIL** — Python stack walking requires the GIL, which adds some overhead per tracked allocation.

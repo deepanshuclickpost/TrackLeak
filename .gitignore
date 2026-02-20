@@ -1,0 +1,24 @@
+# Build output
+trackleak.so
+*.o
+*.so
+
+# Logs
+*.log
+*.json
+/var/log/memory-profiler/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*~
+
+# OS
+.DS_Store
+Thumbs.db

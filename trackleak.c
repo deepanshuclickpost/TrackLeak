@@ -70,6 +70,7 @@
 #define DEFAULT_SAMPLE_RATE 50                // Default: sample 1 in 50 allocations
 #define JSON_BUFFER_SIZE 8192                 // Buffer size for JSON output
 #define MAX_LOG_SIZE (10 * 1024 * 1024)       // 10MB max before rotation
+#define DEFAULT_TOP_N 20                      // Default: show top 20 functions in dump
 
 // Default log paths (overridable via env vars)
 #define DEFAULT_LOG_DIR "/var/log/memory-profiler"
@@ -173,6 +174,7 @@ typedef struct {
     int sample_rate;                          // Sample 1 in N allocations
     int min_alloc_size;                       // Min bytes to track
     int startup_delay;                        // Seconds to wait before profiling
+    int top_n;                                // Number of top functions to show in dump
 } profiler_config_t;
 
 /* ==================== Global Variables ==================== */
@@ -366,6 +368,7 @@ static void load_config() {
     prof_config.sample_rate    = env_int("TRACKLEAK_SAMPLE_RATE", DEFAULT_SAMPLE_RATE);
     prof_config.min_alloc_size = env_int("TRACKLEAK_MIN_SIZE", DEFAULT_MIN_ALLOC_SIZE);
     prof_config.startup_delay  = env_int("TRACKLEAK_STARTUP_DELAY", DEFAULT_STARTUP_DELAY);
+    prof_config.top_n          = env_int("TRACKLEAK_TOP_N", DEFAULT_TOP_N);
 
     // Elasticsearch settings
     const char *enable_es = getenv("ENABLE_ELASTICSEARCH");
@@ -386,11 +389,10 @@ static void load_config() {
     // Log configuration (directory + filenames)
     load_log_config();
 
-    // Log configuration
     fprintf(stderr, "[trackleak] Configuration loaded:\n");
-    fprintf(stderr, "[trackleak]   dump_interval=%ds, sample_rate=1/%d, min_size=%d, startup_delay=%ds\n",
+    fprintf(stderr, "[trackleak]   dump_interval=%ds, sample_rate=1/%d, min_size=%d, startup_delay=%ds, top_n=%d\n",
             prof_config.dump_interval, prof_config.sample_rate,
-            prof_config.min_alloc_size, prof_config.startup_delay);
+            prof_config.min_alloc_size, prof_config.startup_delay, prof_config.top_n);
     fprintf(stderr, "[trackleak]   elasticsearch=%s\n", es_config.enabled ? "ENABLED" : "disabled");
 
     if (es_config.enabled) {
@@ -401,9 +403,14 @@ static void load_config() {
             fprintf(stderr, "[trackleak]   url=%s\n", es_config.url);
             fprintf(stderr, "[trackleak]   index=%s\n", es_config.index);
             if (es_config.api_key[0] != '\0') {
-                fprintf(stderr, "[trackleak]   auth=API key\n");
+                /* Mask API key: show first 8 chars then *** */
+                char masked[16];
+                int show = (strlen(es_config.api_key) > 8) ? 8 : (int)strlen(es_config.api_key);
+                strncpy(masked, es_config.api_key, show);
+                masked[show] = '\0';
+                fprintf(stderr, "[trackleak]   auth=API key (%s***)\n", masked);
             } else if (es_config.username[0] != '\0') {
-                fprintf(stderr, "[trackleak]   auth=basic (%s)\n", es_config.username);
+                fprintf(stderr, "[trackleak]   auth=basic (%s / ***)\n", es_config.username);
             } else {
                 fprintf(stderr, "[trackleak]   auth=none (anonymous)\n");
             }
@@ -613,6 +620,37 @@ static void cleanup_elasticsearch() {
 
 /* ==================== Initialization ==================== */
 
+/* ==================== Signal Handler ==================== */
+
+/**
+ * SIGUSR1 handler — triggers an immediate stats dump on demand.
+ * Usage: kill -USR1 <pid>
+ *
+ * This is async-signal-safe: we just set a flag here and let the
+ * next malloc() call perform the actual dump via check_and_dump_if_needed().
+ */
+static volatile sig_atomic_t sigusr1_received = 0;
+
+static void sigusr1_handler(int signum) {
+    (void)signum;
+    sigusr1_received = 1;
+}
+
+static void register_signal_handler() {
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = sigusr1_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESTART;
+    if (sigaction(SIGUSR1, &sa, NULL) != 0) {
+        fprintf(stderr, "[trackleak] WARNING: Failed to register SIGUSR1 handler: %s\n",
+                strerror(errno));
+    } else {
+        fprintf(stderr, "[trackleak] SIGUSR1 handler registered (kill -USR1 %d to dump now)\n",
+                (int)getpid());
+    }
+}
+
 /**
  * Constructor — runs when library is loaded via LD_PRELOAD.
  */
@@ -624,6 +662,9 @@ void profiler_init() {
 
     // Load all configuration from environment
     load_config();
+
+    // Register SIGUSR1 for on-demand dump
+    register_signal_handler();
 
     // Initialize Elasticsearch (if enabled)
     init_elasticsearch();
@@ -1065,8 +1106,8 @@ void dump_memory_statistics() {
     char es_bulk_data[ES_BULK_BUFFER_SIZE];
     int es_bulk_len = 0;
 
-    // Write top 20 functions to log and ES
-    int limit = (stats_count > 20) ? 20 : stats_count;
+    // Write top N functions to log and ES
+    int limit = (stats_count > prof_config.top_n) ? prof_config.top_n : stats_count;
 
     // Write column header
     if (json_log_fp && limit > 0) {
@@ -1185,10 +1226,16 @@ static void check_and_dump_if_needed() {
     static pthread_mutex_t dump_mutex = PTHREAD_MUTEX_INITIALIZER;
     time_t now = time(NULL);
 
-    if (now - last_dump_time < prof_config.dump_interval) return;
+    int force_dump = sigusr1_received;
+    if (force_dump) {
+        sigusr1_received = 0;
+        fprintf(stderr, "[trackleak] SIGUSR1 received — forcing immediate stats dump\n");
+    }
+
+    if (!force_dump && now - last_dump_time < prof_config.dump_interval) return;
 
     if (pthread_mutex_trylock(&dump_mutex) == 0) {
-        if (now - last_dump_time >= prof_config.dump_interval) {
+        if (force_dump || now - last_dump_time >= prof_config.dump_interval) {
             last_dump_time = now;
             dump_memory_statistics();
         }

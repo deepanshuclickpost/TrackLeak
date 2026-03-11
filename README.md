@@ -389,6 +389,19 @@ The test script exercises:
 
 ---
 
+### On-Demand Dump (SIGUSR1)
+
+You can trigger an immediate stats dump at any time without waiting for the interval:
+
+`kill -USR1 $(pgrep -f your_app.py)`
+
+
+TrackLeak prints the PID on startup so you can grab it easily:
+
+`[trackleak] SIGUSR1 handler registered (kill -USR1 12345 to dump now)`
+
+This is useful during debugging when you want a snapshot right now, not in 5 minutes.
+
 ## Elasticsearch Integration
 
 TrackLeak can ship profiling data to Elasticsearch in real-time for dashboards and alerting.
